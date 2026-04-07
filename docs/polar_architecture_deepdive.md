@@ -335,8 +335,8 @@ token: str = get_token()   # raises RuntimeError if not authorized
 data/
   fetcher.py        ← HTTP calls to Polar API → raw dicts
   transformer.py    ← raw dict → normalized pd.DataFrame
-  cache.py          ← Parquet persistence + @st.cache_data wrappers
-  __init__.py       ← exports: get_nightly_recharge, get_sleep, get_exercises
+  cache.py          ← Pure Parquet persistence (no Streamlit)
+  __init__.py       ← exports: load_nightly_recharge, load_sleep, load_exercises
 ```
 
 **`fetcher.py` — raw API calls, returns dicts:**
@@ -381,9 +381,9 @@ def nightly_recharge_to_df(raw: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(records).sort_values("date").reset_index(drop=True)
 ```
 
-**`cache.py` — persistence + session cache:**
+**`cache.py` — pure persistence, environment-aware:**
 ```python
-import streamlit as st
+import os
 import pandas as pd
 from pathlib import Path
 from auth import get_token
@@ -391,27 +391,47 @@ from data.fetcher import fetch_nightly_recharge
 from data.transformer import nightly_recharge_to_df
 
 CACHE_DIR = Path("cache")
-CACHE_DIR.mkdir(exist_ok=True)
+IS_LOCAL = not os.getenv("STREAMLIT_SHARING")  # Detect cloud vs local
 
-@st.cache_data(ttl=3600)
-def get_nightly_recharge() -> pd.DataFrame:
-    path = CACHE_DIR / "nightly_recharge.parquet"
+if IS_LOCAL:
+    CACHE_DIR.mkdir(exist_ok=True)
 
-    # Load from disk if available
-    df = pd.read_parquet(path) if path.exists() else pd.DataFrame()
-
-    # Fetch only new data
-    since = str(df["date"].max().date()) if not df.empty else "2020-01-01"
+def load_nightly_recharge() -> pd.DataFrame:
+    """
+    Load nightly recharge data from Parquet (local) or fresh API fetch (cloud).
+    Pure function: no Streamlit dependencies.
+    
+    Local: Incremental fetch with Parquet cache (fast, survives restarts)
+    Cloud: Full fetch from API (no persistent storage, per-session only)
+    """
+    cache_file = CACHE_DIR / "nightly_recharge.parquet"
+    
+    # Local: load existing cache and fetch only new data
+    if IS_LOCAL and cache_file.exists():
+        df = pd.read_parquet(cache_file)
+        since = str(df["date"].max().date())  # Incremental
+    else:
+        df = pd.DataFrame()
+        since = "2020-01-01"  # Fetch all available data
+    
     until = str(pd.Timestamp.today().date())
-
     raw = fetch_nightly_recharge(get_token(), since=since, until=until)
+    
     if raw:
         new_df = nightly_recharge_to_df(raw)
         df = pd.concat([df, new_df]).drop_duplicates("date").sort_values("date")
-        df.to_parquet(path, index=False)
-
+        
+        # Persist to Parquet only in local dev (not in cloud)
+        if IS_LOCAL:
+            df.to_parquet(cache_file, index=False)
+    
     return df
 ```
+
+**Key Design:**
+- Parquet cache used **only locally** (gitignored, not deployed)
+- Cloud deployment fetches from API on demand
+- Layer 2 remains pure (no Streamlit), just environment-aware
 
 ---
 
@@ -525,14 +545,24 @@ The only layer that imports Streamlit. Assembles data, analysis, and charts; han
 # pages/1_HRV_Recharge.py
 
 import streamlit as st
-from data import get_nightly_recharge
+from data.cache import load_nightly_recharge
 from analysis.hrv import add_rolling_average, flag_low_hrv
 from viz.charts_hrv import hrv_timeseries
 
 st.title("HRV & Nightly Recharge")
 
-# — Data —
-df = get_nightly_recharge()
+# — Data (per-user session state for multi-user safety) —
+def get_data():
+    """
+    Load data with per-user session caching.
+    Uses st.session_state to isolate data between users (not shared).
+    """
+    if "nightly_recharge" not in st.session_state:
+        with st.spinner("Loading HRV data from Polar API..."):
+            st.session_state.nightly_recharge = load_nightly_recharge()
+    return st.session_state.nightly_recharge
+
+df = get_data()
 
 # — Analysis —
 df = add_rolling_average(df, "hrv_avg_ms", window=7)
@@ -544,12 +574,14 @@ with col1:
     days = st.slider("Show last N days", 30, 365, 90)
 with col2:
     if st.button("🔄 Refresh data"):
-        st.cache_data.clear()
+        del st.session_state.nightly_recharge  # Clear per-user cache
         st.rerun()
 
 filtered = df.tail(days)
 st.plotly_chart(hrv_timeseries(filtered), use_container_width=True)
 ```
+
+**Critical:** `@st.cache_data` is **shared globally across all users**. For multi-user deployments, always use `st.session_state` to ensure data isolation.
 
 ---
 
@@ -620,10 +652,10 @@ polar-dashboard/
 │   └── polar_auth.py          # OAuth2 flow (CLI) + get_token()
 │
 ├── data/                      # Layer 2 — Data
-│   ├── __init__.py            # exports: get_nightly_recharge, get_sleep, get_exercises
+│   ├── __init__.py            # exports: load_nightly_recharge, load_sleep, load_exercises
 │   ├── fetcher.py             # Raw HTTP calls → dict
 │   ├── transformer.py         # dict → pd.DataFrame (normalized schema)
-│   └── cache.py               # Parquet + @st.cache_data wrappers
+│   └── cache.py               # Pure Parquet read/write (no Streamlit)
 │
 ├── analysis/                  # Layer 3 — Analysis
 │   ├── __init__.py

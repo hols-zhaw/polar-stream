@@ -252,8 +252,8 @@ The AccessLink API does **not** expose raw RR interval data. The available HRV m
 | **Language** | Python 3.11+ | Best ecosystem for data analysis; official Polar examples in Python |
 | **API Client** | Official `accesslink/` module (from official repo) or `pip install polar-accesslink` | Battle-tested, wraps all endpoints cleanly |
 | **Data Processing** | Pandas, NumPy | Standard for time series manipulation |
-| **Persistent Cache** | **Parquet** (via `pandas.to_parquet`) | Compressed, fast, future-proof; readable by DuckDB, Spark etc. |
-| **Session Cache** | `@st.cache_data(ttl=3600)` | Avoids re-reading disk on every Streamlit interaction |
+| **Persistent Cache (local only)** | **Parquet** (via `pandas.to_parquet`) | Compressed, fast, local dev only — not committed to Git |
+| **Session Cache (cloud)** | `st.session_state` per-user | Isolated per user, survives page interactions, lost on browser close |
 | **Frontend** | **Streamlit** | Minimal code, native multi-page support, built-in Plotly/Altair integration |
 | **Charts** | **Plotly** (primary) + Altair (secondary) | Interactive zoom/hover; great for time series |
 | **Config/Secrets** | `config.yml` (local) / Streamlit Secrets (cloud) | Keeps credentials out of code |
@@ -262,33 +262,76 @@ The AccessLink API does **not** expose raw RR interval data. The available HRV m
 
 ### Caching Strategy
 
+**Environment-aware two-tier approach:**
+
+#### Local Development (Parquet)
+- Fast persistent cache in `cache/` directory (gitignored)
+- Incremental fetches (only new data since last cached date)
+- Survives app restarts
+
+#### Cloud Deployment (Session State)
+- Per-user `st.session_state` cache (isolated, not shared between users)
+- Fresh API fetch on first page load per session
+- Lost on browser close (acceptable: re-fetch on next visit)
+- No persistent storage needed
+
 ```python
-import streamlit as st
+# data/cache.py (Layer 2) — Environment-aware, no Streamlit import
+import os
 import pandas as pd
 from pathlib import Path
+from auth import get_token
+from data.fetcher import fetch_nightly_recharge
+from data.transformer import nightly_recharge_to_df
 
 CACHE_DIR = Path("cache")
-CACHE_DIR.mkdir(exist_ok=True)
+IS_LOCAL = not os.getenv("STREAMLIT_SHARING")  # Detect Streamlit Cloud
 
-@st.cache_data(ttl=3600)
+if IS_LOCAL:
+    CACHE_DIR.mkdir(exist_ok=True)
+
 def load_nightly_recharge() -> pd.DataFrame:
+    """
+    Load nightly recharge data. Uses Parquet locally, pure API fetch in cloud.
+    Pure function: no Streamlit dependencies.
+    """
     cache_file = CACHE_DIR / "nightly_recharge.parquet"
-    if cache_file.exists():
+    
+    # Local: incremental fetch with Parquet cache
+    if IS_LOCAL and cache_file.exists():
         df = pd.read_parquet(cache_file)
+        since = str(df["date"].max().date())
     else:
-        df = pd.DataFrame()  # empty fallback
-
-    # Fetch only new data from API (since last cached date)
-    last_date = df["date"].max() if not df.empty else "2020-01-01"
-    new_data = fetch_from_polar(endpoint="nightly_recharge", since=last_date)
-
-    if new_data:
-        new_df = pd.DataFrame(new_data)
-        df = pd.concat([df, new_df]).drop_duplicates("date")
-        df.to_parquet(cache_file, index=False)
-
+        df = pd.DataFrame()
+        since = "2020-01-01"  # Fetch all available data
+    
+    until = str(pd.Timestamp.today().date())
+    raw = fetch_nightly_recharge(get_token(), since=since, until=until)
+    
+    if raw:
+        new_df = nightly_recharge_to_df(raw)
+        df = pd.concat([df, new_df]).drop_duplicates("date").sort_values("date")
+        
+        # Save to Parquet only locally
+        if IS_LOCAL:
+            df.to_parquet(cache_file, index=False)
+    
     return df
+
+# pages/1_HRV.py (Layer 5) — Per-user session state
+import streamlit as st
+from data.cache import load_nightly_recharge
+
+def get_data():
+    """Load data with per-user session caching (isolates between users)."""
+    if "nightly_recharge" not in st.session_state:
+        st.session_state.nightly_recharge = load_nightly_recharge()
+    return st.session_state.nightly_recharge
+
+df = get_data()  # Cached per user in session state
 ```
+
+**Security Note:** `@st.cache_data` without user-specific keys is **shared across all users** — unsafe for multi-user deployments. Always use `st.session_state` for per-user data isolation.
 
 ### Config File Structure
 
@@ -298,6 +341,21 @@ client_id: "YOUR_CLIENT_ID"
 client_secret: "YOUR_CLIENT_SECRET"
 access_token: "YOUR_ACCESS_TOKEN"   # written by authorization_callback_server.py
 user_id: "YOUR_POLAR_USER_ID"       # written by authorization_callback_server.py
+```
+
+**`.gitignore` (Critical):**
+```gitignore
+# Secrets
+config.yml
+
+# Local cache (Parquet files — do NOT commit)
+cache/
+*.parquet
+
+# Python
+__pycache__/
+*.pyc
+.venv/
 ```
 
 ---
@@ -326,7 +384,8 @@ polar-dashboard/
 ├── data/
 │   ├── client.py                 # Wrapper: loads config, initializes AccessLink
 │   ├── fetcher.py                # fetch_sleep(), fetch_nightly_recharge(), fetch_exercises()
-│   └── cache.py                  # Parquet read/write + @st.cache_data decorators
+│   ├── transformer.py            # Pure transformations: dict → DataFrame
+│   └── cache.py                  # Pure Parquet read/write (no Streamlit)
 │
 ├── cache/                        # Local Parquet files (gitignored)
 │   ├── nightly_recharge.parquet
@@ -374,9 +433,12 @@ polar-dashboard/
 
 ### Phase 5 — Streamlit Cloud Deployment (Week 2)
 
-- [ ] Push repo to GitHub (with `config.yml` in `.gitignore`)
-- [ ] Add secrets via Streamlit Cloud Secrets Manager
-- [ ] Deploy and test on mobile (iPhone/iPad browser)
+- [ ] Verify `.gitignore` excludes `config.yml` and `cache/`
+- [ ] Push repo to GitHub
+- [ ] Add secrets via Streamlit Cloud Secrets Manager (client_id, client_secret, access_token, user_id)
+- [ ] Test cloud deployment: verify data fetches from API (no Parquet)
+- [ ] Confirm per-user isolation with `st.session_state`
+- [ ] Test on mobile (iPhone/iPad browser)
 
 ---
 
@@ -387,5 +449,6 @@ polar-dashboard/
 | **HRV samples (5-min intervals)?** | Need to check if v4 `nightly-recharge?features=samples` is available for standard API clients (may require Polar partner approval) |
 | **Historical data?** | API only delivers data from registration date onwards. Older data must be manually exported from Polar Flow. Consider a one-time import script. |
 | **Webhook for near real-time?** | Not needed for personal use. If deployed publicly later, a small FastAPI backend (e.g. on Railway) can handle webhook ingestion. |
-| **Multi-user (future)?** | Streamlit Cloud free tier has no built-in auth. Options: Streamlit `st.secrets` + password gate for small groups, or migrate to Next.js + FastAPI for full multi-user OAuth. |
+| **Multi-user (future)?** | Current design uses `st.session_state` for per-user isolation — safe for multiple users with separate OAuth tokens. For true multi-user with login flow, add authentication layer (e.g. `streamlit-authenticator` or OAuth proxy). |
+| **Persistent cloud storage?** | Not implemented. Streamlit Cloud has ephemeral filesystem. Data re-fetched per session from Polar API. For persistent cloud cache, add Supabase/MongoDB backend (future Phase 6). |
 | **GPX/route data?** | The `GET /v3/exercises/{id}/tcx` endpoint returns full GPS tracks. Could be added as a map view (e.g. via `streamlit-folium`) in a later phase. |
