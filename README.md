@@ -1,10 +1,10 @@
-# polar-stream
+# Polar Stream
 
 > Your Polar data, your dashboard — stream your training, recovery and sleep into custom analytics.
 
 A personal analytics dashboard for [Polar](https://www.polar.com) sports watches, built with [Streamlit](https://streamlit.io) and the [Polar AccessLink API](https://www.polar.com/accesslink-api/). Visualizes nightly HRV trends, sleep quality, and training performance beyond what Polar Flow offers out of the box.
 
-![Python](https://img.shields.io/badge/python-3.11+-blue) ![Streamlit](https://img.shields.io/badge/streamlit-1.x-red) ![License](https://img.shields.io/badge/license-MIT-green)
+![Python](https://img.shields.io/badge/python-3.14+-blue) ![Streamlit](https://img.shields.io/badge/streamlit-1.x-red) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
