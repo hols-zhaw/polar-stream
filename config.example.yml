@@ -1,0 +1,10 @@
+# Polar AccessLink API Configuration
+# Copy this file to config.yml and fill in your credentials
+# Get your credentials at: https://admin.polaraccesslink.com
+
+client_id: "YOUR_CLIENT_ID_HERE"
+client_secret: "YOUR_CLIENT_SECRET_HERE"
+
+# These will be filled automatically after running: python -m auth.polar_auth
+# access_token: ""
+# user_id: ""

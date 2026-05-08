@@ -284,3 +284,16 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/python,jupyternotebooks,visualstudiocode,microsoftoffice,macos,windows
+# ============================================
+# Polar Stream — Project-Specific
+# ============================================
+
+# Secrets (NEVER commit these!)
+config.yml
+
+# Local Parquet cache (do NOT commit to GitHub)
+cache/
+*.parquet
+
+# Streamlit
+.streamlit/secrets.toml
